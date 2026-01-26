@@ -1,0 +1,7 @@
+{
+  "python": {
+    "version": "3.11",
+    "entry": "app/main.py",
+    "package_manager": "pip"
+  }
+}

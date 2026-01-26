@@ -1,0 +1,86 @@
+services:
+  # PostgreSQL 数据库
+  postgres:
+    image: postgres:15-alpine
+    container_name: english_tube_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-english_tube}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me_in_production}
+      POSTGRES_DB: ${DB_NAME:-english_tube}
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups  # 数据库备份目录
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-english_tube}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - english_tube_network
+
+  # Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: english_tube_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER:-english_tube}:${DB_PASSWORD:-change_me_in_production}@postgres:5432/${DB_NAME:-english_tube}
+      - ASYNC_DATABASE_URL=postgresql+asyncpg://${DB_USER:-english_tube}:${DB_PASSWORD:-change_me_in_production}@postgres:5432/${DB_NAME:-english_tube}
+    ports:
+      - "${BACKEND_PORT:-8002}:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads  # 如果有文件上传需求
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - english_tube_network
+    command: >
+      sh -c "
+        echo 'Waiting for postgres...' &&
+        sleep 5 &&
+        echo 'Running database migrations...' &&
+        alembic upgrade head &&
+        echo 'Starting server...' &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+      "
+
+  # Nginx 反向代理
+  nginx:
+    image: nginx:alpine
+    container_name: english_tube_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro  # SSL 证书目录
+      - ./nginx/logs:/var/log/nginx
+    depends_on:
+      - backend
+    networks:
+      - english_tube_network
+
+networks:
+  english_tube_network:
+    driver: bridge
+
+volumes:
+  postgres_data:

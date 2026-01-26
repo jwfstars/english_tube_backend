@@ -1,0 +1,1011 @@
+# Vue 管理后台集成视频上传功能实施计划（Local Agent 方案）
+
+## ⚠️ 方案更新说明
+
+**原方案问题**：
+- ❌ Backend 在国内服务器，无法访问 YouTube（GFW）
+- ❌ 视频处理会占用服务器大量资源（内存 4-8GB，CPU 密集）
+
+**新方案**：Local Uploader Agent
+- ✅ 处理在用户本地进行（可以访问 YouTube）
+- ✅ 不占用服务器资源
+- ✅ 线上和本地 Vue Admin 都能用
+
+---
+
+## 一、方案概述
+
+**目标**：在 Vue.js 管理后台添加完整的视频上传功能，完全迁移 CLI segment 流程。
+
+**核心架构**：Local Agent 方案
+
+```
+┌──────────────────────────────────────────────────┐
+│ Vue Admin (english_tube_admin)                   │
+│ - 视频管理                                        │
+│ - 【新增】上传页面                                │
+│   └─ 检测本地 Agent                              │
+│   └─ 发起上传请求 → http://localhost:9000       │
+│   └─ 实时进度显示（WebSocket）                   │
+│                                                   │
+│ 运行位置：浏览器（本地或线上访问都可以）         │
+└──────────────────────────────────────────────────┘
+         ↓ HTTP API (查询数据)
+┌──────────────────────────────────────────────────┐
+│ Backend API (backend)                            │
+│ - 视频 CRUD                                       │
+│ - upload_tasks 表（存储上传历史）                 │
+│ - ❌ 不做视频处理                                 │
+│                                                   │
+│ 运行位置：国内云服务器                            │
+└──────────────────────────────────────────────────┘
+         ↑ 写入数据
+┌──────────────────────────────────────────────────┐
+│ Local Uploader Agent (uploader/agent.py)        │
+│ - HTTP 服务：http://localhost:9000               │
+│ - 接收上传请求                                    │
+│ - 执行 VideoProcessingPipeline                   │
+│   └─ 下载 YouTube 视频                           │
+│   └─ FFmpeg 处理                                 │
+│   └─ WhisperX 语音识别                           │
+│   └─ AI 生成学习内容                             │
+│   └─ 上传到腾讯云 VOD/COS                        │
+│   └─ 写入 Backend API                            │
+│ - WebSocket 推送进度                             │
+│                                                   │
+│ 运行位置：用户本地 Mac                           │
+└──────────────────────────────────────────────────┘
+```
+
+**关键特性**：
+- ✅ 完全复用 `VideoProcessingPipeline`
+- ✅ 解决 YouTube 访问问题（本地可用代理）
+- ✅ 解决资源消耗问题（不占用服务器）
+- ✅ 线上和本地 Vue Admin 都能使用
+- ✅ JavaScript 在浏览器运行，自动访问 localhost:9000
+
+**用户问题解答**：
+- **线上 admin 能上传吗？** → **YES**，JavaScript 在浏览器运行，访问用户本地的 Agent
+- **必须启动本地 Agent？** → **YES**，需要先运行 `python -m uploader.agent`
+
+---
+
+## 二、实施步骤
+
+### Phase 1：Local Uploader Agent（核心）
+
+#### Step 1.1：创建 Local Agent 服务
+
+**新建文件**：`/uploader/uploader/agent.py`
+
+**功能**：
+- 提供 HTTP API（端口 9000）
+- 接收 Vue Admin 的上传请求
+- 执行 VideoProcessingPipeline
+- 通过 WebSocket 推送实时进度
+- 配置 CORS 允许线上 Vue Admin 访问
+
+**核心代码**：
+```python
+from fastapi import FastAPI, WebSocket, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from uploader.pipeline import VideoProcessingPipeline, ProcessingCallbacks
+from uuid import uuid4
+from typing import Dict, Set
+import asyncio
+
+app = FastAPI(title="Local Uploader Agent")
+
+# 配置 CORS（允许线上 Vue Admin 访问）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8858",          # 本地开发
+        "https://yourdomain.com",         # 线上部署
+        "https://englishtube.top",        # 实际域名
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class AgentTaskManager:
+    def __init__(self):
+        self.tasks: Dict[str, asyncio.Task] = {}
+        self.websockets: Dict[str, Set[WebSocket]] = {}
+        self.task_status: Dict[str, dict] = {}
+
+    async def start_task(self, task_id: str, params: dict):
+        """启动异步处理任务"""
+        task = asyncio.create_task(self._run_pipeline(task_id, params))
+        self.tasks[task_id] = task
+
+    async def _run_pipeline(self, task_id: str, params: dict):
+        """运行 VideoProcessingPipeline"""
+        try:
+            # 更新状态
+            self.task_status[task_id] = {
+                "status": "running",
+                "progress": 0,
+                "message": "开始处理..."
+            }
+
+            # 创建回调
+            callbacks = self._create_callbacks(task_id)
+
+            # 执行处理
+            pipeline = VideoProcessingPipeline(callbacks=callbacks)
+            result = pipeline.process(**params)
+
+            # 更新状态
+            self.task_status[task_id] = {
+                "status": "completed",
+                "progress": 100,
+                "result": {
+                    "video_id": str(result.video_id) if result.video_id else None,
+                    "segments_count": result.segments_count,
+                    "words_count": result.words_count,
+                    "phrases_count": result.phrases_count,
+                }
+            }
+
+            # 推送完成消息
+            await self._broadcast(task_id, {
+                "type": "complete",
+                "result": self.task_status[task_id]["result"]
+            })
+
+        except Exception as e:
+            self.task_status[task_id] = {
+                "status": "failed",
+                "error": str(e)
+            }
+            await self._broadcast(task_id, {
+                "type": "error",
+                "message": str(e)
+            })
+
+    def _create_callbacks(self, task_id: str):
+        """创建 WebSocket 推送回调"""
+        return ProcessingCallbacks(
+            on_status=lambda msg: asyncio.create_task(
+                self._broadcast(task_id, {"type": "status", "message": msg})
+            ),
+            on_progress=lambda cur, tot, msg: asyncio.create_task(
+                self._broadcast(task_id, {
+                    "type": "progress",
+                    "current": cur,
+                    "total": tot,
+                    "message": msg
+                })
+            ),
+            on_step_start=lambda step: asyncio.create_task(
+                self._broadcast(task_id, {"type": "step_start", "step": step})
+            ),
+            on_step_complete=lambda step: asyncio.create_task(
+                self._broadcast(task_id, {"type": "step_complete", "step": step})
+            ),
+            on_error=lambda err: asyncio.create_task(
+                self._broadcast(task_id, {"type": "error", "message": err})
+            ),
+        )
+
+    async def _broadcast(self, task_id: str, message: dict):
+        """广播消息到所有连接的 WebSocket"""
+        if task_id in self.websockets:
+            dead_sockets = set()
+            for ws in self.websockets[task_id]:
+                try:
+                    await ws.send_json(message)
+                except:
+                    dead_sockets.add(ws)
+
+            # 清理断开的连接
+            self.websockets[task_id] -= dead_sockets
+
+    def register_websocket(self, task_id: str, ws: WebSocket):
+        """注册 WebSocket 连接"""
+        if task_id not in self.websockets:
+            self.websockets[task_id] = set()
+        self.websockets[task_id].add(ws)
+
+    def unregister_websocket(self, task_id: str, ws: WebSocket):
+        """注销 WebSocket 连接"""
+        if task_id in self.websockets:
+            self.websockets[task_id].discard(ws)
+
+# 全局任务管理器
+task_manager = AgentTaskManager()
+
+@app.get("/health")
+async def health_check():
+    """健康检查（用于 Vue Admin 检测 Agent 是否运行）"""
+    return {"status": "ok", "agent": "Local Uploader Agent", "version": "1.0.0"}
+
+@app.post("/upload")
+async def upload_video(params: dict, background_tasks: BackgroundTasks):
+    """接收上传请求"""
+    task_id = str(uuid4())
+
+    # 启动后台任务
+    background_tasks.add_task(task_manager.start_task, task_id, params)
+
+    return {"task_id": task_id, "status": "pending"}
+
+@app.websocket("/ws/{task_id}")
+async def websocket_endpoint(websocket: WebSocket, task_id: str):
+    """WebSocket 进度推送"""
+    await websocket.accept()
+    task_manager.register_websocket(task_id, websocket)
+
+    try:
+        while True:
+            # Keep alive
+            await websocket.receive_text()
+    except:
+        pass
+    finally:
+        task_manager.unregister_websocket(task_id, websocket)
+
+@app.get("/status/{task_id}")
+async def get_task_status(task_id: str):
+    """查询任务状态"""
+    if task_id in task_manager.task_status:
+        return task_manager.task_status[task_id]
+    else:
+        return {"status": "not_found"}
+
+if __name__ == "__main__":
+    import uvicorn
+    print("🚀 Local Uploader Agent 启动中...")
+    print("📡 监听端口: http://localhost:9000")
+    print("✅ 允许跨域: https://yourdomain.com")
+    print("💡 在 Vue Admin 中可以开始上传了！")
+    uvicorn.run(app, host="0.0.0.0", port=9000)
+```
+
+#### Step 1.2：添加启动脚本
+
+**新建文件**：`/uploader/uploader/__main__.py`
+
+```python
+"""
+启动 Local Uploader Agent
+
+使用方法：
+    python -m uploader.agent
+"""
+
+if __name__ == "__main__":
+    from uploader.agent import app
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=9000, log_level="info")
+```
+
+**使用方式**：
+```bash
+cd /Users/winfield/workspace/Apps/projects/english_tube/uploader
+python -m uploader.agent
+```
+
+#### Step 1.3：Schema 定义
+
+**新建文件**：`/uploader/uploader/schemas.py`
+
+```python
+from pydantic import BaseModel, HttpUrl
+from typing import Optional
+
+class UploadParams(BaseModel):
+    """上传参数"""
+    youtube_url: HttpUrl
+    quality: int = 720
+    whisper_model: str = "small"
+    min_duration: int = 60
+    max_duration: int = 120
+    target_segments: Optional[int] = None
+    skip_learning: bool = False
+    upload_db: bool = True
+    upload_cos: bool = True
+
+class TaskStatus(BaseModel):
+    """任务状态"""
+    task_id: str
+    status: str  # pending/running/completed/failed
+    progress: int = 0
+    message: Optional[str] = None
+    result: Optional[dict] = None
+    error: Optional[str] = None
+```
+
+---
+
+### Phase 2：Backend API（轻量级）
+
+#### Step 2.1：数据库 Schema
+
+**新增表**：`upload_tasks` - 仅用于记录历史，不执行处理
+
+**创建 migration**：
+```bash
+cd /Users/winfield/workspace/Apps/projects/english_tube/backend
+source ../.venv/bin/activate
+alembic revision -m "add upload_tasks table"
+```
+
+**文件位置**：
+- Model: `/backend/app/models/upload_task.py` (新建)
+- Migration: `/backend/alembic/versions/xxx_add_upload_tasks.py` (自动生成)
+
+**表结构**：
+```sql
+CREATE TABLE upload_tasks (
+    id UUID PRIMARY KEY,
+    user_id UUID REFERENCES users(id),
+    youtube_url TEXT NOT NULL,
+
+    -- 配置参数
+    quality INTEGER DEFAULT 720,
+    whisper_model VARCHAR(20) DEFAULT 'small',
+
+    -- 任务状态（由 Local Agent 写入）
+    status VARCHAR(20) DEFAULT 'pending',
+
+    -- 结果
+    video_id UUID REFERENCES videos(id),
+    segments_count INTEGER DEFAULT 0,
+    words_count INTEGER DEFAULT 0,
+    phrases_count INTEGER DEFAULT 0,
+    error_message TEXT,
+
+    -- 时间戳
+    created_at TIMESTAMP DEFAULT NOW(),
+    completed_at TIMESTAMP
+);
+```
+
+#### Step 2.2：API Endpoints（可选）
+
+**新建文件**：`/backend/app/api/v1/endpoints/upload_history.py`
+
+**功能**：仅提供查询接口，不处理上传
+
+```python
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from app.models.upload_task import UploadTask
+from app.api.deps import get_db
+
+router = APIRouter()
+
+@router.get("/history")
+async def get_upload_history(
+    skip: int = 0,
+    limit: int = 20,
+    db: Session = Depends(get_db)
+):
+    """获取上传历史"""
+    tasks = db.query(UploadTask).order_by(
+        UploadTask.created_at.desc()
+    ).offset(skip).limit(limit).all()
+
+    total = db.query(UploadTask).count()
+
+    return {"items": tasks, "total": total}
+
+@router.get("/history/{task_id}")
+async def get_upload_task(task_id: str, db: Session = Depends(get_db)):
+    """获取任务详情"""
+    task = db.query(UploadTask).filter(UploadTask.id == task_id).first()
+    return task
+```
+
+**注册路由**（可选）：
+```python
+# backend/app/api/v1/api.py
+from app.api.v1.endpoints import upload_history
+
+api_router.include_router(
+    upload_history.router,
+    prefix="/upload",
+    tags=["upload"]
+)
+```
+
+---
+
+### Phase 3：Vue Admin 上传页面
+
+#### Step 3.1：创建上传页面
+
+**新建文件**：`/english_tube_admin/src/views/admin/upload/index.vue`
+
+**核心功能**：
+1. 检测本地 Agent 是否运行
+2. 配置表单
+3. 实时进度显示
+4. 结果展示
+
+**完整代码**：
+```vue
+<template>
+  <div class="upload-container">
+    <!-- Agent 状态检测 -->
+    <el-alert
+      v-if="!agentRunning"
+      type="warning"
+      title="本地 Uploader Agent 未运行"
+      :closable="false"
+      show-icon
+    >
+      <template #default>
+        <p>请在终端执行以下命令启动 Agent：</p>
+        <el-code style="margin-top: 10px; display: block">
+          cd /path/to/uploader<br>
+          python -m uploader.agent
+        </el-code>
+        <el-button
+          @click="detectAgent"
+          type="primary"
+          size="small"
+          style="margin-top: 10px"
+        >
+          重新检测
+        </el-button>
+      </template>
+    </el-alert>
+
+    <!-- 上传表单 -->
+    <el-card v-if="agentRunning" style="margin-top: 20px">
+      <template #header>
+        <div class="card-header">
+          <span>视频上传配置</span>
+          <el-tag type="success" size="small">
+            本地 Agent 已连接
+          </el-tag>
+        </div>
+      </template>
+
+      <el-form :model="form" label-width="140px" :rules="rules" ref="formRef">
+        <el-form-item label="YouTube URL" prop="youtube_url" required>
+          <el-input
+            v-model="form.youtube_url"
+            placeholder="https://www.youtube.com/watch?v=xxx"
+          />
+        </el-form-item>
+
+        <el-form-item label="视频质量">
+          <el-select v-model="form.quality">
+            <el-option label="360p" :value="360" />
+            <el-option label="480p" :value="480" />
+            <el-option label="720p (推荐)" :value="720" />
+            <el-option label="1080p" :value="1080" />
+          </el-select>
+        </el-form-item>
+
+        <el-form-item label="Whisper 模型">
+          <el-select v-model="form.whisper_model">
+            <el-option label="Tiny (最快)" value="tiny" />
+            <el-option label="Base (快速)" value="base" />
+            <el-option label="Small (推荐)" value="small" />
+            <el-option label="Medium (更准确)" value="medium" />
+          </el-select>
+        </el-form-item>
+
+        <el-form-item label="分段时长">
+          <el-row :gutter="20">
+            <el-col :span="12">
+              <el-input-number
+                v-model="form.min_duration"
+                :min="30"
+                :max="300"
+                style="width: 100%"
+              />
+              <span style="margin-left: 10px">秒（最小）</span>
+            </el-col>
+            <el-col :span="12">
+              <el-input-number
+                v-model="form.max_duration"
+                :min="60"
+                :max="600"
+                style="width: 100%"
+              />
+              <span style="margin-left: 10px">秒（最大）</span>
+            </el-col>
+          </el-row>
+        </el-form-item>
+
+        <el-form-item label="目标分段数">
+          <el-input-number
+            v-model="form.target_segments"
+            :min="1"
+            clearable
+            style="width: 200px"
+          />
+          <span style="margin-left: 10px; color: #999">
+            （留空自动判断）
+          </span>
+        </el-form-item>
+
+        <el-form-item label="高级选项">
+          <el-checkbox v-model="form.skip_learning">
+            跳过学习内容生成
+          </el-checkbox>
+        </el-form-item>
+
+        <el-form-item>
+          <el-button
+            type="primary"
+            @click="startUpload"
+            :loading="uploading"
+            :disabled="!agentRunning"
+          >
+            {{ uploading ? '处理中...' : '开始上传' }}
+          </el-button>
+        </el-form-item>
+      </el-form>
+    </el-card>
+
+    <!-- 进度展示 -->
+    <el-card v-if="taskId" style="margin-top: 20px">
+      <template #header>
+        <div class="card-header">
+          <span>处理进度</span>
+          <el-tag :type="progressStatus">{{ statusText }}</el-tag>
+        </div>
+      </template>
+
+      <el-progress
+        :percentage="progress"
+        :status="progressStatus === 'success' ? 'success' : undefined"
+      />
+
+      <div v-if="currentStep" class="current-step">
+        <el-icon><Loading /></el-icon>
+        {{ currentStep }}
+      </div>
+
+      <!-- 实时日志 -->
+      <el-timeline style="margin-top: 20px; max-height: 400px; overflow-y: auto">
+        <el-timeline-item
+          v-for="log in logs"
+          :key="log.id"
+          :timestamp="log.time"
+          :type="log.type"
+        >
+          {{ log.message }}
+        </el-timeline-item>
+      </el-timeline>
+
+      <!-- 完成结果 -->
+      <el-result
+        v-if="uploadResult"
+        icon="success"
+        title="上传成功！"
+        style="margin-top: 20px"
+      >
+        <template #sub-title>
+          <p>视频 ID: {{ uploadResult.video_id }}</p>
+          <p>生成片段: {{ uploadResult.segments_count }} 个</p>
+          <p>单词卡片: {{ uploadResult.words_count }} 个</p>
+          <p>短语卡片: {{ uploadResult.phrases_count }} 个</p>
+        </template>
+        <template #extra>
+          <el-button type="primary" @click="resetForm">再传一个</el-button>
+        </template>
+      </el-result>
+    </el-card>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onMounted, reactive } from 'vue'
+import { ElMessage } from 'element-plus'
+
+const AGENT_URL = 'http://localhost:9000'
+
+// Agent 状态
+const agentRunning = ref(false)
+
+// 表单
+const form = reactive({
+  youtube_url: '',
+  quality: 720,
+  whisper_model: 'small',
+  min_duration: 60,
+  max_duration: 120,
+  target_segments: null,
+  skip_learning: false
+})
+
+const rules = {
+  youtube_url: [
+    { required: true, message: '请输入 YouTube URL', trigger: 'blur' }
+  ]
+}
+
+// 任务状态
+const taskId = ref('')
+const uploading = ref(false)
+const progress = ref(0)
+const currentStep = ref('')
+const logs = ref<any[]>([])
+const uploadResult = ref<any>(null)
+const progressStatus = ref('')
+const statusText = ref('准备中')
+
+// 检测本地 Agent
+async function detectAgent() {
+  try {
+    const response = await fetch(`${AGENT_URL}/health`)
+    if (response.ok) {
+      agentRunning.value = true
+      ElMessage.success('检测到本地 Agent')
+    }
+  } catch (error) {
+    agentRunning.value = false
+    ElMessage.warning('本地 Agent 未运行，请先启动')
+  }
+}
+
+// 开始上传
+async function startUpload() {
+  uploading.value = true
+  progress.value = 0
+  logs.value = []
+  uploadResult.value = null
+  currentStep.value = ''
+  statusText.value = '处理中'
+
+  try {
+    // 1. 创建任务
+    const response = await fetch(`${AGENT_URL}/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(form)
+    })
+
+    const { task_id } = await response.json()
+    taskId.value = task_id
+
+    addLog('info', '任务已创建，开始处理...')
+
+    // 2. WebSocket 连接
+    connectWebSocket(task_id)
+  } catch (error) {
+    ElMessage.error('上传失败: ' + error.message)
+    uploading.value = false
+  }
+}
+
+// WebSocket 连接
+function connectWebSocket(taskId: string) {
+  const ws = new WebSocket(`ws://localhost:9000/ws/${taskId}`)
+
+  ws.onopen = () => {
+    addLog('success', 'WebSocket 连接成功')
+  }
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data)
+
+    switch (msg.type) {
+      case 'status':
+        addLog('info', msg.message)
+        break
+
+      case 'progress':
+        progress.value = Math.floor((msg.current / msg.total) * 100)
+        currentStep.value = msg.message
+        addLog('info', `进度: ${msg.current}/${msg.total} - ${msg.message}`)
+        break
+
+      case 'step_start':
+        addLog('primary', `开始: ${msg.step}`)
+        break
+
+      case 'step_complete':
+        addLog('success', `完成: ${msg.step}`)
+        break
+
+      case 'complete':
+        progress.value = 100
+        progressStatus.value = 'success'
+        statusText.value = '完成'
+        uploading.value = false
+        uploadResult.value = msg.result
+        addLog('success', '处理完成！')
+        break
+
+      case 'error':
+        progressStatus.value = 'exception'
+        statusText.value = '失败'
+        uploading.value = false
+        addLog('danger', '错误: ' + msg.message)
+        ElMessage.error('处理失败: ' + msg.message)
+        break
+    }
+  }
+
+  ws.onerror = () => {
+    addLog('danger', 'WebSocket 连接错误')
+    uploading.value = false
+  }
+
+  ws.onclose = () => {
+    addLog('warning', 'WebSocket 连接关闭')
+  }
+}
+
+// 添加日志
+function addLog(type: string, message: string) {
+  logs.value.push({
+    id: Date.now(),
+    time: new Date().toLocaleTimeString(),
+    type,
+    message
+  })
+}
+
+// 重置表单
+function resetForm() {
+  taskId.value = ''
+  progress.value = 0
+  logs.value = []
+  uploadResult.value = null
+  form.youtube_url = ''
+}
+
+// 挂载时检测 Agent
+onMounted(() => {
+  detectAgent()
+})
+</script>
+
+<style scoped>
+.upload-container {
+  padding: 20px;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.current-step {
+  margin-top: 20px;
+  padding: 12px;
+  background-color: #f5f7fa;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.el-code {
+  background-color: #f5f5f5;
+  padding: 10px;
+  border-radius: 4px;
+  font-family: monospace;
+}
+</style>
+```
+
+#### Step 3.2：路由配置
+
+**修改文件**：`/english_tube_admin/src/router/modules/admin.ts`
+
+```typescript
+{
+  path: "/admin",
+  component: Layout,
+  children: [
+    // ... 其他路由
+    {
+      path: "upload",
+      name: "Upload",
+      component: () => import("@/views/admin/upload/index.vue"),
+      meta: {
+        title: "视频上传",
+        icon: "Upload",
+        roles: ["admin"]
+      }
+    }
+  ]
+}
+```
+
+---
+
+## 三、使用流程
+
+### 本地开发环境
+
+```bash
+# 终端 1：启动数据库
+cd /Users/winfield/workspace/Apps/projects/english_tube/backend
+docker-compose up -d postgres
+
+# 终端 2：启动 Backend API
+python -m uvicorn app.main:app --reload --port 8002
+
+# 终端 3：启动 Local Uploader Agent（新增）
+cd /Users/winfield/workspace/Apps/projects/english_tube/uploader
+python -m uploader.agent
+
+# 终端 4：启动 Vue Admin
+cd /Users/winfield/workspace/Apps/projects/english_tube/english_tube_admin
+pnpm dev
+
+# 浏览器访问：http://localhost:8858/admin/upload
+```
+
+### 线上使用
+
+```bash
+# 本地：启动 Local Agent
+cd /Users/winfield/workspace/Apps/projects/english_tube/uploader
+python -m uploader.agent
+
+# 浏览器访问：https://yourdomain.com/admin/upload
+# Vue Admin 自动检测到本地 Agent，显示上传功能
+```
+
+**原理**：
+- Vue Admin 的 JavaScript 在**浏览器**中运行
+- 浏览器访问 `http://localhost:9000`（用户本地）
+- 无论 Vue Admin 部署在哪里，都能访问用户本地的 Agent
+
+---
+
+## 四、关键文件清单
+
+### 需要新建的文件
+
+| 文件路径 | 作用 |
+|---------|------|
+| `/uploader/uploader/agent.py` | Local Agent 服务（核心） |
+| `/uploader/uploader/__main__.py` | Agent 启动入口 |
+| `/uploader/uploader/schemas.py` | 数据模型定义 |
+| `/backend/app/models/upload_task.py` | 上传历史记录表（可选） |
+| `/backend/app/api/v1/endpoints/upload_history.py` | 历史查询接口（可选） |
+| `/english_tube_admin/src/views/admin/upload/index.vue` | Vue 上传页面 |
+
+### 需要修改的文件
+
+| 文件路径 | 修改内容 |
+|---------|---------|
+| `/english_tube_admin/src/router/modules/admin.ts` | 添加上传路由 |
+| `/backend/app/api/v1/api.py` | 注册历史查询路由（可选） |
+
+### 核心依赖文件（无需修改）
+
+| 文件路径 | 重要性 |
+|---------|--------|
+| `/uploader/uploader/pipeline.py` | ⭐⭐⭐ 核心处理流程（完全复用） |
+| `/uploader/uploader/config.py` | ⭐⭐ Uploader 配置 |
+
+---
+
+## 五、技术要点
+
+### 5.1 CORS 跨域配置
+
+**问题**：线上 Vue Admin 访问本地 Agent 会遇到 CORS
+
+**解决**：
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8858",
+        "https://yourdomain.com"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+### 5.2 WebSocket 实时推送
+
+**后端**：
+```python
+async def _broadcast(self, task_id: str, message: dict):
+    for ws in self.websockets[task_id]:
+        await ws.send_json(message)
+```
+
+**前端**：
+```typescript
+const ws = new WebSocket(`ws://localhost:9000/ws/${taskId}`)
+ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data)
+    // 更新 UI
+}
+```
+
+### 5.3 Agent 检测机制
+
+```typescript
+async function detectAgent() {
+  try {
+    const response = await fetch('http://localhost:9000/health')
+    if (response.ok) {
+      agentRunning.value = true
+    }
+  } catch {
+    agentRunning.value = false
+  }
+}
+```
+
+---
+
+## 六、优势总结
+
+### 解决的问题
+
+1. **YouTube 访问** ✅
+   - 处理在本地，可以使用代理
+   - 国内服务器无需访问 YouTube
+
+2. **资源消耗** ✅
+   - 重型处理在本地 Mac
+   - 服务器只负责轻量级数据管理
+
+3. **灵活部署** ✅
+   - 本地和线上 Vue Admin 都能用
+   - 只要本地 Agent 运行即可
+
+4. **完全复用** ✅
+   - 100% 使用 VideoProcessingPipeline
+   - 不重写任何处理逻辑
+
+### 架构优势
+
+- ✅ 简单：Local Agent 只是一个轻量级 HTTP 服务
+- ✅ 解耦：Vue Admin 不依赖服务器处理能力
+- ✅ 安全：数据仍然存储在云端数据库
+- ✅ 可扩展：未来可以支持多用户协作
+
+---
+
+## 七、后续优化
+
+1. **批量上传**：支持队列处理多个视频
+2. **历史记录**：在 Vue Admin 查看所有上传历史
+3. **配置预设**：保存常用配置模板
+4. **进度恢复**：断线重连后恢复进度显示
+5. **Agent 自启动**：macOS 登录时自动启动 Agent
+
+---
+
+## 八、预计工作量
+
+- **Phase 1**（Local Agent）：0.5-1 天
+- **Phase 2**（Backend API 可选）：0.5 天
+- **Phase 3**（Vue Admin UI）：1 天
+- **测试和优化**：0.5 天
+- **总计**：2-3 天
+
+---
+
+## 九、快速启动指南
+
+```bash
+# 1. 安装依赖
+cd /Users/winfield/workspace/Apps/projects/english_tube/uploader
+pip install fastapi uvicorn websockets
+
+# 2. 启动 Local Agent
+python -m uploader.agent
+
+# 3. 访问 Vue Admin
+# 浏览器打开：http://localhost:8858/admin/upload
+# 或线上：https://yourdomain.com/admin/upload
+
+# 4. 开始上传！
+```
