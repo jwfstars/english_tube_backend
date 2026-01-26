@@ -1,0 +1,27 @@
+# 开发工具依赖
+# 在虚拟环境中使用: pip install -r requirements-dev.txt
+
+# 代码格式化
+black==24.1.1
+isort==5.13.2
+
+# 代码检查
+flake8==7.0.0
+pylint==3.0.3
+mypy==1.8.0
+
+# 测试
+pytest==8.0.0
+pytest-asyncio==0.23.4
+pytest-cov==4.1.0
+httpx==0.26.0
+
+# 调试
+ipython==8.20.0
+ipdb==0.13.13
+
+# 性能分析
+pytest-benchmark==4.0.0
+
+# API 测试
+httpie==3.2.2
