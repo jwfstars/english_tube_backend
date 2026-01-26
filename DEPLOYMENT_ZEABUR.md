@@ -2,6 +2,8 @@
 
 本文档描述如何将 English Tube 后端部署到 Zeabur 平台。
 
+> **部署方式**：本项目使用 Zeabur 原生部署（无需 Docker），充分利用平台的自动优化和快速启动特性。
+
 ## 🚀 部署步骤
 
 ### 1. 准备工作
@@ -31,8 +33,9 @@
 
 1. 在项目中点击 "Add Service"
 2. 选择 "Git" → 连接你的 GitHub 仓库
-3. 选择 `backend` 目录作为根目录（Root Directory）
-4. Zeabur 会自动检测 Dockerfile 并开始构建
+3. 选择整个仓库（根目录）
+4. Zeabur 会自动检测为 Python 项目（基于 `zbpack.json`）
+5. 自动安装依赖并部署
 
 ### 5. 配置环境变量
 

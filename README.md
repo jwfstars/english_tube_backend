@@ -4,7 +4,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104.1-009688?logo=fastapi)](https://fastapi.tiangolo.com)
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python)](https://www.python.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?logo=postgresql)](https://www.postgresql.org)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://www.docker.com)
+[![Zeabur](https://img.shields.io/badge/Zeabur-Deploy-00A98F?logo=zeabur)](https://zeabur.com)
 
 English Tube 后端 API 服务，基于 FastAPI + PostgreSQL 构建的英语学习平台后端。
 
@@ -17,8 +17,8 @@ English Tube 后端 API 服务，基于 FastAPI + PostgreSQL 构建的英语学�
 - 📊 **学习进度** - 视频观看进度追踪
 - 🎯 **标签分类** - 视频标签和分类管理
 - 🚀 **异步性能** - 基于 asyncio 的高性能异步 API
-- 📦 **容器化** - Docker + Docker Compose 一键部署
-- ☁️ **云部署** - 支持 Zeabur PaaS 平台快速部署
+- ☁️ **云原生** - Zeabur 原生部署，无需 Docker
+- 📦 **本地开发** - 虚拟环境或 Docker Compose 可选
 
 ## 📦 技术栈
 
@@ -27,8 +27,8 @@ English Tube 后端 API 服务，基于 FastAPI + PostgreSQL 构建的英语学�
 - **数据迁移**: Alembic
 - **认证**: JWT (python-jose) + Argon2 密码哈希
 - **云服务**: 腾讯云 VOD + 腾讯云短信
-- **容器化**: Docker + Docker Compose
-- **部署**: Zeabur / 宝塔面板 / Docker Compose
+- **部署**: Zeabur 原生部署（推荐）
+- **本地开发**: Python 虚拟环境 + Docker PostgreSQL
 
 ## 🚀 快速开始（本地开发）
 
@@ -89,42 +89,44 @@ docker-compose exec backend python -m scripts.create_superuser \
 
 ## ☁️ 云端部署
 
-### Zeabur 部署（推荐）
+### Zeabur 部署（推荐）⭐
 
-Zeabur 是一个简单易用的 PaaS 平台，支持自动化部署。
+**为什么选择 Zeabur 原生部署？**
+- ⚡ 部署快速（30秒-1分钟）
+- 💰 成本更低（按实际使用计费）
+- 🚀 冷启动快（< 5秒）
+- 🔧 自动优化（无需管理 Docker）
 
 **快速部署步骤**：
 
-1. 登录 [Zeabur Dashboard](https://dash.zeabur.com/)
-2. 创建新项目
-3. 添加 PostgreSQL 服务
-4. 添加 Git 服务，连接此仓库
+1. 推送代码到 GitHub
+2. 登录 [Zeabur Dashboard](https://dash.zeabur.com/)
+3. 添加 PostgreSQL 服务（Marketplace）
+4. 添加 Git 服务（连接此仓库）
 5. 配置环境变量（参考 `.env.zeabur.example`）
-6. 自动部署完成
+6. 自动部署完成！
 
-📖 **详细文档**: [Zeabur 部署指南](./DEPLOYMENT_ZEABUR.md) | [部署检查清单](./ZEABUR_CHECKLIST.md)
+📖 **详细文档**: 
+- [部署方案说明](./DEPLOYMENT_OPTIONS.md) - 为什么不用 Docker
+- [Zeabur 部署指南](./DEPLOYMENT_ZEABUR.md) - 详细步骤
+- [部署检查清单](./ZEABUR_CHECKLIST.md) - 快速参考
 
-### Docker 部署
+### 其他部署方式
 
-适用于 VPS 或自建服务器：
-
+**Docker Compose（本地/测试）**：
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/jwfstars/english_tube_backend.git
-cd english_tube_backend
-
-# 2. 配置生产环境变量
-cp .env.example .env
-vim .env  # 修改为生产环境配置
-
-# 3. 启动服务
+# 适用于本地开发或测试环境
 docker-compose up -d
-
-# 4. 查看状态
-docker-compose ps
 ```
 
-📖 **详细文档**: [Docker 部署指南](./DEPLOYMENT.md) | [宝塔面板部署](./DEPLOYMENT_BAOTA.md)
+**传统服务器（VPS/宝塔面板）**：
+```bash
+# 1. 安装 Python 3.12 + PostgreSQL
+# 2. 克隆仓库并安装依赖
+# 3. 配置 Nginx 反向代理
+```
+
+📖 **详细文档**: [宝塔面板部署](./DEPLOYMENT_BAOTA.md)
 
 ---
 

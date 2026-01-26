@@ -1,3 +1,13 @@
+# Docker Compose 配置
+# 
+# 用途：仅用于本地开发和测试环境
+# 生产部署：请使用 Zeabur 原生部署（无 Docker）
+# 
+# 快速启动：
+#   docker-compose up -d            # 启动所有服务
+#   docker-compose down             # 停止所有服务
+#   docker-compose logs -f backend  # 查看日志
+
 services:
   # PostgreSQL 数据库
   postgres:

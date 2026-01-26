@@ -1,7 +1,8 @@
 {
   "python": {
-    "version": "3.11",
+    "version": "3.12",
     "entry": "app/main.py",
     "package_manager": "pip"
-  }
+  },
+  "start_command": "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2"
 }
