@@ -180,9 +180,9 @@ docker-compose up -d  # Docker Compose 方式
 
 **需要更新**：
 ```bash
-# Zeabur 自动注入 POSTGRES_URL
-DATABASE_URL=${POSTGRES_URL}
-ASYNC_DATABASE_URL=${POSTGRES_URL}
+# Zeabur 自动注入 POSTGRES_URI
+DATABASE_URL=${POSTGRES_URI}
+ASYNC_DATABASE_URL=${POSTGRES_URI}
 ```
 
 ### 3. 数据库迁移
@@ -210,7 +210,7 @@ ASYNC_DATABASE_URL=${POSTGRES_URL}
 
 **解决**：
 1. 确保 PostgreSQL 服务已添加
-2. 确认环境变量：`DATABASE_URL=${POSTGRES_URL}`
+2. 确认环境变量：`DATABASE_URL=${POSTGRES_URI}`
 3. 检查 `app/core/database.py` 的 URL 转换逻辑
 
 ### 问题：迁移未执行

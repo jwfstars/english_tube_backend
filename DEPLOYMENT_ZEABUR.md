@@ -44,19 +44,12 @@
 #### 必需配置
 
 ```bash
-# 数据库配置（使用 Zeabur PostgreSQL 的连接信息）
-DATABASE_URL=postgresql://${POSTGRES_USERNAME}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DATABASE}
-ASYNC_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USERNAME}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DATABASE}
+# 数据库配置（Zeabur 自动注入 POSTGRES_URI）
+DATABASE_URL=${POSTGRES_URI}
+ASYNC_DATABASE_URL=${POSTGRES_URI}
 
 # JWT 配置（⚠️ 生产环境必须使用强密钥）
 SECRET_KEY=<使用 openssl rand -hex 32 生成>
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=10080
-
-# API 配置
-API_V1_STR=/api/v1
-PROJECT_NAME=English Tube API
-VERSION=1.0.0
 
 # CORS 配置（替换为你的实际域名）
 BACKEND_CORS_ORIGINS=["https://你的前端域名.zeabur.app","https://你的管理后台域名.zeabur.app"]
@@ -65,23 +58,16 @@ BACKEND_CORS_ORIGINS=["https://你的前端域名.zeabur.app","https://你的管
 #### 可选配置
 
 ```bash
-# 腾讯云 VOD 视频点播
+# 腾讯云 VOD 视频点播（如果使用视频功能）
 VOD_APP_ID=1253432963
 VOD_PLAY_KEY=你的密钥
-VOD_PSIGN_EXPIRE_SECONDS=3600
-VOD_PSIGN_AUDIO_VIDEO_TYPE=Original
-VOD_PSIGN_RAW_ADAPTIVE_DEFINITION=
-VOD_PSIGN_TRANSCODE_DEFINITION=
 
-# 腾讯云短信服务（可选）
+# 腾讯云短信服务（如果需要短信验证码）
 TENCENT_SMS_SECRET_ID=你的密钥ID
 TENCENT_SMS_SECRET_KEY=你的密钥
 TENCENT_SMS_SDK_APP_ID=你的APP_ID
 TENCENT_SMS_SIGN_NAME=你的签名
 TENCENT_SMS_TEMPLATE_ID=你的模板ID
-TENCENT_SMS_REGION=ap-guangzhou
-SMS_CODE_EXPIRE_MINUTES=10
-SMS_DEBUG=false
 ```
 
 ### 6. 获取服务域名
