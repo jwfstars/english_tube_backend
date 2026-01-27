@@ -44,9 +44,8 @@
 #### 必需配置
 
 ```bash
-# 数据库配置（Zeabur 自动注入 POSTGRES_URI）
+# 数据库配置（Zeabur 自动注入 POSTGRES_URI，代码会自动转换为 asyncpg 格式）
 DATABASE_URL=${POSTGRES_URI}
-ASYNC_DATABASE_URL=${POSTGRES_URI}
 
 # JWT 配置（⚠️ 生产环境必须使用强密钥）
 SECRET_KEY=<使用 openssl rand -hex 32 生成>

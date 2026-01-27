@@ -20,7 +20,12 @@ def _build_async_url(url: str) -> str:
         return url.replace("postgres://", "postgresql+asyncpg://", 1)
     return url
 
-async_url = settings.ASYNC_DATABASE_URL.strip() or _build_async_url(settings.DATABASE_URL)
+# 优先使用 ASYNC_DATABASE_URL，否则从 DATABASE_URL 转换
+# 无论哪个来源，都需要确保是 asyncpg 格式
+if settings.ASYNC_DATABASE_URL.strip():
+    async_url = _build_async_url(settings.ASYNC_DATABASE_URL)
+else:
+    async_url = _build_async_url(settings.DATABASE_URL)
 
 engine = create_async_engine(
     async_url,
