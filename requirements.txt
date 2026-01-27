@@ -23,6 +23,7 @@ pydantic-settings==2.1.0
 
 # 工具
 python-dotenv==1.0.0
+setuptools>=65.0.0
 
 # CORS
 fastapi-cors==0.0.6
